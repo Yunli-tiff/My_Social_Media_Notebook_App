@@ -2,6 +2,7 @@ import openai
 import streamlit as st
 import os
 
+# 從環境變數讀取金鑰
 openai.api_key = os.getenv("OPENAI_API_KEY", None)
 if not openai.api_key:
     raise RuntimeError("找不到 OPENAI_API_KEY，請先設定環境變數")
