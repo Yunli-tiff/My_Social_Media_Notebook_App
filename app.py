@@ -1,4 +1,4 @@
-import openai, streamlit as st
+import streamlit as st
 import pandas as pd
 import os
 import time
@@ -9,15 +9,6 @@ from utils.search_filter import filter_notes
 from utils.markdown_export import export_notes_to_md
 from utils.notion_api import upload_to_notion
 from utils.dropbox_export import upload_to_dropbox
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 先在畫面或側邊輸出目前 openai 模組真實路徑與版本
-st.sidebar.write("**DEBUG ⇒ 執行時 openai 位置：**", openai.__file__)
-try:
-    st.sidebar.write("**DEBUG ⇒ 執行時 openai 版本：**", openai.__version__)
-except AttributeError:
-    st.sidebar.write("**DEBUG ⇒ openai 沒有 __version__ 屬性**")
-
 
 # Streamlit 基本設定
 st.set_page_config(
@@ -99,18 +90,16 @@ if upload_files:
                 content = file.read().decode("utf-8")
 
             # 2. GPT 進行「摘要 + 主題分類」
-            summary_output = gpt_summarize_and_classify(content)
-            # 回傳格式範例： 
-            #  摘要：這是一段 GPT 生成的 100 字以內摘要
-            #  主題分類：生活
-            lines = [line.strip() for line in summary_output.strip().split("\n") if line.strip()]
-            if len(lines) >= 2:
-                summary = lines[0].replace("摘要：", "").strip()
-                category = lines[1].replace("主題分類：", "").strip()
-            else:
-                # 抓不到格式則放到「其他」
-                summary = summary_output[:100]
-                category = "其他"
+            #    現在 gpt_summarize_and_classify 會直接回傳 (summary, category)
+            summary, category = gpt_summarize_and_classify(content)
+
+            # 在畫面上顯示摘要與分類
+            st.markdown("**摘要：**")
+            st.write(summary)
+
+            st.markdown("**主題分類：**")
+            st.write(category)
+
 
             note_data.append({
                 "檔名": file.name,
