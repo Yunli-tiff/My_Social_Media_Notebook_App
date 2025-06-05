@@ -1,8 +1,11 @@
+# utils/gpt.py
+
 import openai
+from openai.api_resources.chat.completion import ChatCompletion
 import streamlit as st
 import os
 
-# 從環境變數讀取金鑰
+# 從環境變數讀取 API Key
 openai.api_key = os.getenv("OPENAI_API_KEY", None)
 if not openai.api_key:
     raise RuntimeError("找不到 OPENAI_API_KEY，請先設定環境變數")
@@ -21,10 +24,12 @@ def gpt_summarize_and_classify(text: str) -> str:
 主題分類：...
 """
     try:
-        response = openai.ChatCompletion.create(
+        # 直接用 ChatCompletion 物件呼叫 create，避開舊版代理
+        response = ChatCompletion.create(
             model="gpt-4",
             messages=[{"role": "user", "content": prompt}]
         )
         return response.choices[0].message.content.strip()
     except openai.error.OpenAIError as e:
         return f"GPT 呼叫失敗：{e}"
+
