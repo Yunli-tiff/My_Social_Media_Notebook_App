@@ -1,0 +1,9 @@
+streamlit
+pytesseract
+Pillow
+openai
+whisper
+torch
+pandas
+notion-client
+dropbox

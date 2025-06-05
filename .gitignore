@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg
+*.egg-info/
+dist/
+build/
+# Streamlit
+.streamlit/
+# Env
+.env
+# Data
+*.md
