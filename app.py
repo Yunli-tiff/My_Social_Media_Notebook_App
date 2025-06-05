@@ -2,14 +2,36 @@ import streamlit as st
 import pandas as pd
 import os
 import time
+import tempfile
+import re
+from utils.fetch_url import (
+    fetch_page_html,
+    extract_visible_text,
+    extract_title,
+    download_all_images,
+    download_all_audio,
+)
 from utils.ocr import extract_text_from_image
 from utils.whisper_asr import transcribe_audio
-from utils.gpt import gpt_summarize_and_classify
+from utils.gpt import multilang_summarize_and_classify  # 可以改成你自己的多語摘要函式
 from utils.search_filter import filter_notes
 from utils.markdown_export import export_notes_to_md
 from utils.notion_api import upload_to_notion
 from utils.dropbox_export import upload_to_dropbox
 
+# ──────────── 輔助函式：從文字中擷取所有 URL ────────────
+URL_REGEX = re.compile(
+    r"https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}"
+    r"\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)"
+)
+
+def extract_urls_from_text(text: str) -> list[str]:
+    """
+    從一大段文字裡，找出所有符合 URL_REGEX 的連結。
+    """
+    return re.findall(URL_REGEX, text)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Streamlit 基本設定
 st.set_page_config(
     page_title="社群筆記牆",
@@ -21,9 +43,12 @@ st.set_page_config(
 st.title("📌 社群筆記牆：主題導向的 AI 筆記整理工具")
 st.markdown(
     """
-    此應用能自動將上傳的圖片（OCR）、音訊（Whisper 語音辨識）、純文字
-    內容，透過 GPT 完成「摘要 + 主題分類」，並呈現在可搜尋、可匯出、
-    可同步到 Notion / Dropbox 的互動式筆記牆中。
+    此應用能自動讀取網頁或上傳的多種內容：
+    - 如果貼入一個或多個 URL，會自動抓取網頁裡的文字、圖片與音訊，並做「摘要 + 主題分類」。
+    - 如果上傳的是圖片／音訊／文字檔，同樣會做 OCR/ASR + 摘要分類。
+    無法讀取網址時，會提示使用者先下載檔案再上傳。  
+    支援多語系模型，可自動辨識中、英、日、韓、德等多種語言。
+    最終結果可篩選、匯出、同步到 Notion / Dropbox。
     """,
     unsafe_allow_html=True,
 )
@@ -32,126 +57,254 @@ st.markdown(
 # 側邊欄：操作區
 with st.sidebar:
     st.header("🔧 操作區")
-    # 1. 上傳檔案
+
+    # 1. 上傳檔案（圖片/音訊/文字）
+    st.subheader("📤 上傳圖片 / 音訊 / 純文字檔案")
     upload_files = st.file_uploader(
-        label="📤 上傳圖片 / 音訊 / 純文字檔案",
-        type=["png", "jpg", "jpeg", "mp3", "wav", "txt"],
+        label="點擊上傳...", 
+        type=["png", "jpg", "jpeg", "mp3", "wav", "txt"], 
         accept_multiple_files=True
     )
 
-    # 2. 關鍵字搜尋（後續做篩選）
-    keyword = st.text_input("🔍 關鍵字搜尋", placeholder="搜尋筆記原文...")
+    # 2. 貼入一或多個網址
+    st.markdown("---")
+    st.subheader("🌐 貼入一或多個網址 (一行一個或空格分隔)")
+    paste_urls = st.text_area(
+        label="請直接貼上 URL (http:// 或 https:// 開頭)",
+        placeholder="https://example.com/page1  https://example.com/page2\n或換行貼多個網址...",
+        height=100
+    )
+    process_urls_btn = st.button("➡️ 處理貼入的網址", key="process_urls")
 
-    # 3. 主題分類下拉：動態生成
+    # 3. 關鍵字搜尋
+    st.markdown("---")
+    keyword = st.text_input("🔍 關鍵字搜尋", placeholder="搜尋筆記內容...")
+
+    # 4. 主題分類下拉：動態生成，之後會依 note_data 填入
     category_options_placeholder = st.empty()
 
-    # 4. Notion API 欄位
+    # 5. Notion 同步
     st.markdown("---")
     st.subheader("📒 Notion 同步")
     notion_token = st.text_input(
-        "Notion Integration Token", placeholder="輸入你的 Notion API Token", type="password"
+        "Notion Integration Token", 
+        placeholder="輸入你的 Notion API Token", 
+        type="password"
     )
     notion_db_id = st.text_input(
-        "Notion Database ID", placeholder="輸入目標 Database ID"
+        "Notion Database ID", 
+        placeholder="輸入目標 Database ID"
     )
     sync_notion_btn = st.button("➡️ 同步到 Notion", key="sync_notion")
 
-    # 5. Dropbox 欄位
+    # 6. Dropbox 同步
     st.markdown("---")
     st.subheader("📁 Dropbox 同步")
     dropbox_token = st.text_input(
-        "Dropbox Access Token", placeholder="輸入你的 Dropbox Token", type="password"
+        "Dropbox Access Token", 
+        placeholder="輸入你的 Dropbox Token", 
+        type="password"
     )
     sync_dropbox_btn = st.button("➡️ 備份到 Dropbox", key="sync_dropbox")
 
-    # 6. Markdown 下載按鈕
+    # 7. Markdown 下載
     st.markdown("---")
-    st.subheader("📄 下載匯出")
+    st.subheader("📄 Markdown 匯出")
     export_md_btn = st.button("⬇️ 下載 Markdown", key="export_md")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 主要邏輯：若有檔案上傳，就進行 OCR / Whisper / GPT
-note_data = []  # 儲存所有筆記條目
+# 主要邏輯：note_data 同時儲存「上傳檔案」及「貼入網址」的結果
+note_data = []
 
+# ———— 1) 處理：使用者上傳檔案 ————
 if upload_files:
-    st.sidebar.success(f"已上傳 {len(upload_files)} 筆資料，開始處理⋯⋯")
-    # 顯示 Spinner
-    with st.spinner("📦 處理檔案中 (OCR/ASR/GPT)… 請稍候"):
+    st.sidebar.success(f"已上傳 {len(upload_files)} 筆檔案，開始處理⋯⋯")
+    with st.spinner("📦 進行 OCR/ASR + 多語摘要分類…"):
         for file in upload_files:
-            # 1. 讀取檔案內容
+            # 如果上傳的是 .txt，且裡面可能有多個 URL，先抽出來批次處理
+            if file.name.lower().endswith(".txt"):
+                raw_text = file.read().decode("utf-8")
+                urls = extract_urls_from_text(raw_text)
+
+                if urls:
+                    # 若抓到至少一個 URL，就按每個 URL 處理
+                    for url in urls:
+                        try:
+                            html = fetch_page_html(url)
+                            title = extract_title(html)
+                            text_content = extract_visible_text(html)
+
+                            # 建立臨時資料夾，下載多媒體
+                            tmp_dir = os.path.join(tempfile.gettempdir(), "url_fetch")
+                            os.makedirs(tmp_dir, exist_ok=True)
+                            imgs = download_all_images(html, url, tmp_dir)
+                            audios = download_all_audio(html, url, tmp_dir)
+
+                            # 圖片做 OCR、音訊做 ASR
+                            for img_path in imgs:
+                                text_content += "\n" + extract_text_from_image(open(img_path, "rb"))
+                            for audio_path in audios:
+                                text_content += "\n" + transcribe_audio(open(audio_path, "rb"))
+
+                            summary, category, keywords = multilang_summarize_and_classify(text_content)
+
+                            record = {
+                                "type": "url_batch",
+                                "source": url,
+                                "url": url,
+                                "title": title,
+                                "content": text_content,
+                                "summary": summary,
+                                "category": category,
+                                "keywords": keywords,
+                                "media": imgs + audios
+                            }
+                            note_data.append(record)
+                        except Exception as e:
+                            st.sidebar.error(f"❌ 無法讀取或處理網址：{url}\n請先下載內容再上傳檔案 ({e})")
+                else:
+                    # 純文字檔但無 URL，直接當成一筆「文字內容」跑摘要
+                    content = raw_text
+                    summary, category, keywords = multilang_summarize_and_classify(content)
+                    record = {
+                        "type": "text",
+                        "source": file.name,
+                        "url": "",
+                        "title": file.name,
+                        "content": content,
+                        "summary": summary,
+                        "category": category,
+                        "keywords": keywords,
+                        "media": []
+                    }
+                    note_data.append(record)
+                continue  # 處理完這個 .txt 檔後，繼續下一個上傳檔案
+
+            # 非 .txt：圖片、音訊、或單純文字檔 (其他副檔名)
             if file.type.startswith("image"):
-                # 圖片 OCR
                 content = extract_text_from_image(file)
+                media_paths = []
             elif file.type.startswith("audio"):
-                # Whisper ASR
                 content = transcribe_audio(file)
+                media_paths = []
             else:
-                # 純文字檔案 (.txt)
                 content = file.read().decode("utf-8")
+                media_paths = []
 
-            # 2. GPT 進行「摘要 + 主題分類」
-            #    現在 gpt_summarize_and_classify 會直接回傳 (summary, category)
-            summary, category = gpt_summarize_and_classify(content)
+            summary, category, keywords = multilang_summarize_and_classify(content)
+            record = {
+                "type": "file",
+                "source": file.name,
+                "url": "",
+                "title": file.name,
+                "content": content,
+                "summary": summary,
+                "category": category,
+                "keywords": keywords,
+                "media": media_paths
+            }
+            note_data.append(record)
 
-            # 在畫面上顯示摘要與分類
-            st.markdown("**摘要：**")
-            st.write(summary)
+        time.sleep(0.5)
+    st.sidebar.success("✅ 上傳檔案處理完成！")
 
-            st.markdown("**主題分類：**")
-            st.write(category)
+# ———— 2) 處理：使用者直接貼入網址 ————
+if process_urls_btn and paste_urls:
+    # 從 paste_urls 多行文字裡抽出所有 URL
+    urls = extract_urls_from_text(paste_urls)
+    if not urls:
+        st.sidebar.error("❌ 這段文字中找不到有效的 URL，請確認格式或直接下載後上傳檔案。")
+    else:
+        st.sidebar.success(f"共偵測到 {len(urls)} 個網址，開始批次擷取⋯⋯")
+        with st.spinner("🌐 擷取並處理貼入的網址…"):
+            for url in urls:
+                try:
+                    html = fetch_page_html(url)
+                    title = extract_title(html)
+                    text_content = extract_visible_text(html)
 
+                    tmp_dir = os.path.join(tempfile.gettempdir(), "url_fetch")
+                    os.makedirs(tmp_dir, exist_ok=True)
+                    imgs = download_all_images(html, url, tmp_dir)
+                    audios = download_all_audio(html, url, tmp_dir)
 
-            note_data.append({
-                "檔名": file.name,
-                "主題": category,
-                "摘要": summary,
-                "原文": content
-            })
-        time.sleep(0.5)  # 微幅暫停，避免 Spinner 一閃而過
-    st.sidebar.success("✅ 所有檔案已處理完成！")
+                    for img_path in imgs:
+                        text_content += "\n" + extract_text_from_image(open(img_path, "rb"))
+                    for audio_path in audios:
+                        text_content += "\n" + transcribe_audio(open(audio_path, "rb"))
+
+                    summary, category, keywords = multilang_summarize_and_classify(text_content)
+
+                    record = {
+                        "type": "url",
+                        "source": url,
+                        "url": url,
+                        "title": title,
+                        "content": text_content,
+                        "summary": summary,
+                        "category": category,
+                        "keywords": keywords,
+                        "media": imgs + audios
+                    }
+                    note_data.append(record)
+                except Exception as e:
+                    st.sidebar.error(f"❌ 網址 {url} 處理失敗：{e}\n請先下載檔案再上傳。")
+            time.sleep(0.5)
+        st.sidebar.success("✅ 貼入網址處理完成！")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 若已經產生 note_data，將它轉成 DataFrame
+# 若 note_data 有內容，將它轉成 DataFrame 並顯示
 if note_data:
     notes_df = pd.DataFrame(note_data)
 
-    # 1. 先更新「主題分類」下拉選單選項：先放「全部」再依序放 actual categories
-    category_list = ["全部"] + sorted(notes_df["主題"].unique().tolist())
+    # 1. 更新「主題分類」下拉：先放「全部」再依序放實際 categories
+    category_list = ["全部"] + sorted(notes_df["category"].unique().tolist())
     category = category_options_placeholder.selectbox(
         "🗂️ 選擇主題分類",
         category_list,
         index=0
     )
 
-    # 2. 篩選：先篩「關鍵字」，再篩「主題分類」
-    filtered_df = filter_notes(notes_df, keyword=keyword, category=category)
+    # 2. 篩選：先按關鍵字，再按主題分類
+    filtered_df = filter_notes(
+        notes_df.rename(columns={"category": "主題", "content": "原文", "summary": "摘要"}),
+        keyword=keyword,
+        category=category
+    )
 
     # 3. 左側顯示統計資訊
     col1, col2, col3 = st.columns(3)
-    col1.metric("🔢 總共上傳檔案數", len(upload_files))
+    col1.metric("🔢 總筆記數", len(notes_df))
     col2.metric("📑 篩選後筆記數", len(filtered_df))
     distinct_topics = filtered_df["主題"].nunique()
     col3.metric("📂 篩選後主題數", distinct_topics)
 
     st.markdown("---")
 
-    # 4. 將篩選後的筆記按「主題」分組，排成兩欄展示
+    # 4. 按「主題」分組，兩欄顯示每筆筆記
     grouped = filtered_df.groupby("主題")
-
     for topic, group in grouped:
         st.subheader(f"📂 {topic} ({len(group)})")
-        # 兩欄配置：若只有一筆，則塞到左邊
         left_col, right_col = st.columns(2)
         for idx, row in group.iterrows():
-            with (left_col if (idx % 2 == 0) else right_col).expander(f"📎 {row['檔名']}"):
+            label = row["title"] or row["source"]
+            with (left_col if (idx % 2 == 0) else right_col).expander(f"📎 {label}"):
                 st.markdown(f"**摘要：** {row['摘要']}")
                 st.markdown(f"**原文內容：**\n{row['原文'][:1000]}{'...' if len(row['原文'])>1000 else ''}")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # 5. 處理：按鈕回呼
-    #    A. Markdown 匯出
+    # 5. 按鈕回呼：Markdown 匯出、Notion 同步、Dropbox
     if export_md_btn:
-        export_path = export_notes_to_md(filtered_df.to_dict("records"), path="notes_export.md")
+        export_path = export_notes_to_md(
+            filtered_df.rename(columns={
+                "category": "主題",
+                "content": "原文",
+                "summary": "摘要",
+                "keywords": "關鍵字",
+                "url": "網址",
+                "title": "標題"
+            }).to_dict("records"),
+            path="notes_export.md"
+        )
         with open(export_path, "rb") as f:
             st.sidebar.download_button(
                 label="⬇️ 下載 notes_export.md",
@@ -160,12 +313,11 @@ if note_data:
                 mime="text/markdown"
             )
 
-    #    B. 同步到 Notion
     if sync_notion_btn:
         if not notion_token or not notion_db_id:
             st.sidebar.error("⚠️ 請先填寫 Notion Token 與 Database ID！")
         else:
-            with st.spinner("🔄 同步中…請稍候"):
+            with st.spinner("🔄 同步到 Notion 中…"):
                 success_count = 0
                 for _, row in filtered_df.iterrows():
                     try:
@@ -174,24 +326,34 @@ if note_data:
                             summary=row["摘要"],
                             category=row["主題"],
                             source_text=row["原文"],
-                            notion_token=notion_token
+                            notion_token=notion_token,
+                            url=row["url"],
+                            title=row["title"],
+                            keywords=row["keywords"]
                         )
                         success_count += 1
                     except Exception as e:
-                        st.sidebar.error(f"同步失敗：{row['檔名']} － {e}")
+                        st.sidebar.error(f"同步失敗：{row['source']} － {e}")
                 time.sleep(0.5)
             st.sidebar.success(f"✅ 已成功同步 {success_count} 筆到 Notion！")
 
-    #    C. 備份到 Dropbox
     if sync_dropbox_btn:
         if not dropbox_token:
             st.sidebar.error("⚠️ 請先填寫 Dropbox Token！")
         else:
-            # 先建立臨時 Markdown，再上傳
-            tmp_md = export_notes_to_md(filtered_df.to_dict("records"), path="notes_backup.md")
-            with st.spinner("☁️ 備份中…請稍候"):
+            tmp_md = export_notes_to_md(
+                filtered_df.rename(columns={
+                    "category": "主題",
+                    "content": "原文",
+                    "summary": "摘要",
+                    "keywords": "關鍵字",
+                    "url": "網址",
+                    "title": "標題"
+                }).to_dict("records"),
+                path="notes_backup.md"
+            )
+            with st.spinner("☁️ 備份到 Dropbox 中…"):
                 try:
-                    # Dropbox 路徑：直接放在根目錄下
                     dropbox_path = f"/notes_backup_{int(time.time())}.md"
                     upload_to_dropbox(
                         token=dropbox_token,
@@ -202,7 +364,5 @@ if note_data:
                 except Exception as e:
                     st.sidebar.error(f"Dropbox 備份失敗：{e}")
                     raise
-
 else:
-    # 若尚未上傳任何檔案，顯示提示
-    st.info("請先在左側「操作區」上傳圖片 / 音訊 / 文字檔，系統才會自動產生筆記。")
+    st.info("請先在左側「操作區」上傳檔案、或貼入網址，系統才會自動產生筆記。")
